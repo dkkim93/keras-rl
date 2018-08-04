@@ -228,9 +228,9 @@ class DDPGAgent(Agent):
             names += self.processor.metrics_names[:]
         return names
 
-    def backward(self, reward, terminal=False):
+    def backward(self, reward, total_step, terminal=False):
         # Store most recent experience in memory.
-        if self.step % self.memory_interval == 0:
+        if total_step % self.memory_interval == 0:
             self.memory.append(self.recent_observation, self.recent_action, reward, terminal,
                                training=self.training)
 
@@ -241,8 +241,8 @@ class DDPGAgent(Agent):
             return metrics
 
         # Train the network on a single stochastic batch.
-        can_train_either = self.step > self.nb_steps_warmup_critic or self.step > self.nb_steps_warmup_actor
-        if can_train_either and self.step % self.train_interval == 0:
+        can_train_either = total_step > self.nb_steps_warmup_critic or total_step > self.nb_steps_warmup_actor
+        if can_train_either and total_step % self.train_interval == 0:
             experiences = self.memory.sample(self.batch_size)
             assert len(experiences) == self.batch_size
 
@@ -270,7 +270,7 @@ class DDPGAgent(Agent):
             assert action_batch.shape == (self.batch_size, self.nb_actions)
 
             # Update critic, if warm up is over.
-            if self.step > self.nb_steps_warmup_critic:
+            if total_step > self.nb_steps_warmup_critic:
                 target_actions = self.target_actor.predict_on_batch(state1_batch)
                 assert target_actions.shape == (self.batch_size, self.nb_actions)
                 if len(self.critic.inputs) >= 3:
@@ -299,7 +299,7 @@ class DDPGAgent(Agent):
                     metrics += self.processor.metrics
 
             # Update actor, if warm up is over.
-            if self.step > self.nb_steps_warmup_actor:
+            if total_step > self.nb_steps_warmup_actor:
                 # TODO: implement metrics for actor
                 if len(self.actor.inputs) >= 2:
                     inputs = state0_batch[:]

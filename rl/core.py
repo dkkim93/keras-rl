@@ -178,12 +178,12 @@ class Agent(object):
                     observation = deepcopy(observation)
                     if self.processor is not None:
                         observation, r, done, info = self.processor.process_step(observation, r, done, info)
-                    for key, value in info.items():
-                        if not np.isreal(value):
-                            continue
-                        if key not in accumulated_info:
-                            accumulated_info[key] = np.zeros_like(value)
-                        accumulated_info[key] += value
+                    # for key, value in info.items():
+                    #     if not np.isreal(value):
+                    #         continue
+                    #     if key not in accumulated_info:
+                    #         accumulated_info[key] = np.zeros_like(value)
+                    #     accumulated_info[key] += value
                     callbacks.on_action_end(action)
                     reward += r
                     if done:
@@ -352,12 +352,12 @@ class Agent(object):
                         observation, r, d, info = self.processor.process_step(observation, r, d, info)
                     callbacks.on_action_end(action)
                     reward += r
-                    for key, value in info.items():
-                        if not np.isreal(value):
-                            continue
-                        if key not in accumulated_info:
-                            accumulated_info[key] = np.zeros_like(value)
-                        accumulated_info[key] += value
+                    # for key, value in info.items():
+                    #     if not np.isreal(value):
+                    #         continue
+                    #     if key not in accumulated_info:
+                    #         accumulated_info[key] = np.zeros_like(value)
+                    #     accumulated_info[key] += value
                     if d:
                         done = True
                         break
