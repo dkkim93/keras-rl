@@ -240,6 +240,11 @@ class DDPGAgent(Agent):
             # memory to obtain the state over the most recent observations.
             return metrics
 
+        # Check batch size, if not enough then no training
+        # Times 2 to make sure we have enough batch :-)
+        if len(self.memory.rewards) < self.batch_size * 2:
+            return metrics
+
         # Train the network on a single stochastic batch.
         can_train_either = total_step > self.nb_steps_warmup_critic or total_step > self.nb_steps_warmup_actor
         if can_train_either and total_step % self.train_interval == 0:
