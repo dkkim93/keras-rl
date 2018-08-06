@@ -253,10 +253,11 @@ class SequentialMemory(Memory):
         # This needs to be understood as follows: in `observation`, take `action`, obtain `reward`
         # and weather the next state is `terminal` or not.
         if training:
-            self.observations.append(observation)
-            self.actions.append(action)
-            self.rewards.append(reward)
-            self.terminals.append(terminal)
+            if observation is not None and action is not None and reward is not None:
+                self.observations.append(observation)
+                self.actions.append(action)
+                self.rewards.append(reward)
+                self.terminals.append(terminal)
 
     @property
     def nb_entries(self):
