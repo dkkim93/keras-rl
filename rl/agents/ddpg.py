@@ -1,14 +1,11 @@
 from __future__ import division
-from collections import deque
 import os
 import warnings
 import numpy as np
 import keras.backend as K
 import keras.optimizers as optimizers
 from rl.core import Agent
-from rl.random import OrnsteinUhlenbeckProcess
 from rl.util import *
-from rl.memory import sample_batch_indexes
 from copy import deepcopy
 
 
@@ -27,13 +24,21 @@ class DDPGAgent(Agent):
                  train_interval=1, memory_interval=1, delta_range=None, delta_clip=np.inf,
                  random_process=None, custom_model_objects={}, target_model_update=.001, policy_type=None, **kwargs):
         if hasattr(actor.output, '__len__') and len(actor.output) > 1:
-            raise ValueError('Actor "{}" has more than one output. DDPG expects an actor that has a single output.'.format(actor))
+            raise ValueError(
+                'Actor "{}" has more than one output. \
+                DDPG expects an actor that has a single output.'.format(actor))
         if hasattr(critic.output, '__len__') and len(critic.output) > 1:
-            raise ValueError('Critic "{}" has more than one output. DDPG expects a critic that has a single output.'.format(critic))
+            raise ValueError(
+                'Critic "{}" has more than one output. \
+                DDPG expects a critic that has a single output.'.format(critic))
         if critic_action_input not in critic.input:
-            raise ValueError('Critic "{}" does not have designated action input "{}".'.format(critic, critic_action_input))
+            raise ValueError(
+                'Critic "{}" does not have designated action input "{}".'.format(critic, critic_action_input))
         if not hasattr(critic.input, '__len__') or len(critic.input) < 2:
-            raise ValueError('Critic "{}" does not have enough inputs. The critic must have at exactly two inputs, one for the action and one for the observation.'.format(critic))
+            raise ValueError(
+                'Critic "{}" does not have enough inputs. \
+                The critic must have at exactly two inputs, \
+                one for the action and one for the observation.'.format(critic))
 
         super(DDPGAgent, self).__init__(**kwargs)
 
@@ -48,7 +53,9 @@ class DDPGAgent(Agent):
             target_model_update = float(target_model_update)
 
         if delta_range is not None:
-            warnings.warn('`delta_range` is deprecated. Please use `delta_clip` instead, which takes a single scalar. For now we\'re falling back to `delta_range[1] = {}`'.format(delta_range[1]))
+            warnings.warn(
+                '`delta_range` is deprecated. Please use `delta_clip` instead, which takes a single scalar. \
+                For now we\'re falling back to `delta_range[1] = {}`'.format(delta_range[1]))
             delta_clip = delta_range[1]
 
         # Parameters.
@@ -85,7 +92,9 @@ class DDPGAgent(Agent):
 
         if type(optimizer) in (list, tuple):
             if len(optimizer) != 2:
-                raise ValueError('More than two optimizers provided. Please only provide a maximum of two optimizers, the first one for the actor and the second one for the critic.')
+                raise ValueError(
+                    'More than two optimizers provided. Please only provide a maximum of two optimizers, \
+                    the first one for the actor and the second one for the critic.')
             actor_optimizer, critic_optimizer = optimizer
         else:
             actor_optimizer = optimizer
@@ -132,21 +141,22 @@ class DDPGAgent(Agent):
             raise ValueError()
 
     def compile_meta(self, actor_optimizer, meta_n, i_policy):
-        from keras.layers import Lambda
-
+        # Set combined_inputs and output
         combined_inputs = []
         for i in self.critic.input:
             if i == self.critic_action_input:
                 combined_inputs.append([])
             else:
-                dkdk = i
-                combined_inputs.append(dkdk)
+                critic_obs_input = i
+                combined_inputs.append(critic_obs_input)
 
         actor_input = []
         actor_input.append(self.actor.get_input_at(0))
 
+        # We use placeholder for other meta policies actor output to make sure that 
+        # gradient does not flow from this meta policy's critic to other meta policies' actors.
         actor_output = self.actor(actor_input)
-        actor_output_other = K.placeholder(shape=(None, self.nb_actions * (len(meta_n) - 1)))
+        actor_output_other = K.placeholder(shape=(None, self.nb_actions * (len(meta_n) - 1)))  # Other agts actor output
         actor_output_n = K.concatenate([actor_output, actor_output_other], axis=-1)
 
         combined_inputs[self.critic_action_input_idx] = actor_output_n
@@ -165,7 +175,7 @@ class DDPGAgent(Agent):
         # Finally, combine it all into a callable function.
         if K.backend() == 'tensorflow':
             self.actor_train_fn = K.function(
-                [actor_input[0], K.learning_phase(), actor_output_other, dkdk], 
+                [actor_input[0], K.learning_phase(), actor_output_other, critic_obs_input], 
                 [self.actor(actor_input)], 
                 updates=updates)
         else:
@@ -192,7 +202,7 @@ class DDPGAgent(Agent):
         combined_output = self.critic(combined_inputs)
 
         updates = actor_optimizer.get_updates(
-            params=self.actor.trainable_weights, loss=-K.mean(combined_output))
+            params=self.actor.trainable_weights, loss=-K.mean(combined_output))  # -sign to do gradient ascent
         if self.target_model_update < 1.:
             # Include soft target model updates.
             updates += get_soft_target_model_updates(self.target_actor, self.actor, self.target_model_update)
@@ -286,7 +296,7 @@ class DDPGAgent(Agent):
         return names
 
     def train_exec(self, total_step):
-        experiences = self.memory.sample(self.batch_size)
+        experiences, _ = self.memory.sample(self.batch_size)
         assert len(experiences) == self.batch_size
 
         # Start by extracting the necessary parameters (we use a vectorized implementation).
@@ -357,12 +367,9 @@ class DDPGAgent(Agent):
         assert meta_n is not None
         assert i_policy is not None
 
-        batch_idxs = sample_batch_indexes(
-            low=self.memory.window_length + 5, 
-            high=self.memory.nb_entries - 5, 
-            size=self.batch_size)
-        experiences = self.memory.sample(self.batch_size, batch_idxs)
+        experiences, batch_idxs = self.memory.sample(self.batch_size)
         assert len(experiences) == self.batch_size
+        assert len(batch_idxs) == self.batch_size
 
         # Start by extracting the necessary parameters (we use a vectorized implementation).
         state0_batch = []
@@ -384,10 +391,13 @@ class DDPGAgent(Agent):
         action_batch_n = deepcopy(action_batch)
         for i_meta in range(len(meta_n)):
             if i_meta != i_policy:
-                # TODO Check experiences whether they are synced
-                experiences_other_agt = meta_n[i_meta].policy.memory.sample(self.batch_size, batch_idxs)
+                # NOTE -1 as there is +1 in the sampling function
+                experiences_other_agt, _ = \
+                    meta_n[i_meta].policy.memory.sample(self.batch_size, np.array(batch_idxs) - 1)
 
                 for i_exp, exp in enumerate(experiences_other_agt):
+                    assert reward_batch[i_exp] == exp.reward
+
                     state0_batch_n[i_exp][0] = np.concatenate((
                         state0_batch_n[i_exp][0], exp.state0[0]))
                     state1_batch_n[i_exp][0] = np.concatenate((
@@ -410,17 +420,20 @@ class DDPGAgent(Agent):
         assert action_batch.shape == (self.batch_size, self.nb_actions)
         assert action_batch_n.shape == (self.batch_size, self.nb_actions * len(meta_n))
 
+        assert len(meta_n) <= 2
+
         # Update critic, if warm up is over.
         if total_step > self.nb_steps_warmup_critic:
             # Get target_action_n
             # Because this is centralized critic, we need target_action for all agents
+            # TODO Need more carefull thought for agt > 2
             target_actions = self.target_actor.predict_on_batch(state1_batch)
 
             target_actions_n = deepcopy(target_actions)
             for i_meta in range(len(meta_n)):
                 if i_meta != i_policy:
                     interval = state0_batch.shape[-1]
-                    next_state_batch = state1_batch_n[:, :, i_meta * interval:(i_meta + 1) * interval]
+                    next_state_batch = state1_batch_n[:, :, interval:2 * interval]
                     target_actions = meta_n[i_meta].policy.target_actor.predict_on_batch(next_state_batch)
 
                     target_actions_n = np.concatenate((target_actions_n, target_actions), axis=1)
@@ -433,7 +446,8 @@ class DDPGAgent(Agent):
                 state1_batch_n_with_action = state1_batch_n[:]
             else:
                 state1_batch_n_with_action = [state1_batch_n]
-            state1_batch_n_with_action.insert(self.critic_action_input_idx, target_actions_n)  # Put target_actions in front by input idx
+            state1_batch_n_with_action.insert(
+                self.critic_action_input_idx, target_actions_n)  # Put target_actions in front by input idx
 
             target_q_values = self.target_critic.predict_on_batch(state1_batch_n_with_action).flatten()
             assert target_q_values.shape == (self.batch_size,)
@@ -466,17 +480,20 @@ class DDPGAgent(Agent):
             
             if self.uses_learning_phase:
                 inputs += [self.training]
-            hmm = action_batch_n[:, 2:4]  # TODO 2:4 is not correct when i_policy is 1
-            dkdk = state0_batch_n
-            action_values = self.actor_train_fn([inputs[0], self.training, hmm, dkdk])[0]
+
+            actor_output_other = action_batch_n[:, 2:4]  # TODO Think carefully for agt > 2
+            critic_obs_input = state0_batch_n
+            action_values = self.actor_train_fn(
+                [inputs[0], self.training, actor_output_other, critic_obs_input])[0]
             assert action_values.shape == (self.batch_size, self.nb_actions)
 
-    def backward(self, reward, total_step, terminal=False, meta_n=None, i_policy=None):
+    def add_memory(self, reward, total_step, terminal=False):
         # Store most recent experience in memory.
         if total_step % self.memory_interval == 0:
-            self.memory.append(self.recent_observation, self.recent_action, reward, terminal,
-                               training=self.training)
+            self.memory.append(
+                self.recent_observation, self.recent_action, reward, terminal, training=self.training)
 
+    def backward(self, total_step, meta_n=None, i_policy=None):
         metrics = [np.nan for _ in self.metrics_names]
         if not self.training:
             # We're done here. No need to update the experience memory since we only use the working
@@ -493,20 +510,15 @@ class DDPGAgent(Agent):
         if can_train_either and total_step % self.train_interval == 0:
             if self.policy_type == "exec":
                 self.train_exec(total_step)
-
             elif self.policy_type == "meta":
-                # Check whether all memories have (approx) same length
-                # TODO Better check
-                memory_len_check = True
+                # Check whether all memories have same length
                 memory_len = meta_n[0].policy.memory.nb_entries
                 for i_meta in range(len(meta_n)):
-                    if abs(meta_n[i_meta].policy.memory.nb_entries - memory_len) > 2:
-                        memory_len_check = False
-                        print(abs(meta_n[i_meta].policy.memory.nb_entries - memory_len))
-                assert memory_len_check is True
+                    if i_meta != i_policy:
+                        memory_len_diff = abs(meta_n[i_meta].policy.memory.nb_entries - memory_len)
+                        assert memory_len_diff == 0
 
                 self.train_meta(total_step, meta_n, i_policy)
-
             else:
                 raise ValueError()
 

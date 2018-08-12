@@ -188,8 +188,11 @@ class SequentialMemory(Memory):
         if batch_idxs is None:
             # Draw random indexes such that we have enough entries before each index to fill the
             # desired window length.
+            sample_batch_flag = True
             batch_idxs = sample_batch_indexes(
                 self.window_length, self.nb_entries - 1, size=batch_size)
+        else:
+            sample_batch_flag = False
         batch_idxs = np.array(batch_idxs) + 1
         assert np.min(batch_idxs) >= self.window_length + 1
         assert np.max(batch_idxs) < self.nb_entries
@@ -197,15 +200,18 @@ class SequentialMemory(Memory):
 
         # Create experiences
         experiences = []
+        idx_used = []
         for idx in batch_idxs:
-            terminal0 = self.terminals[idx - 2]
-            while terminal0:
-                # Skip this transition because the environment was reset here. Select a new, random
-                # transition and use this instead. This may cause the batch to contain the same
-                # transition twice.
-                idx = sample_batch_indexes(self.window_length + 1, self.nb_entries, size=1)[0]
+            if sample_batch_flag:
                 terminal0 = self.terminals[idx - 2]
-            assert self.window_length + 1 <= idx < self.nb_entries
+                while terminal0:
+                    # Skip this transition because the environment was reset here. Select a new, random
+                    # transition and use this instead. This may cause the batch to contain the same
+                    # transition twice.
+                    idx = sample_batch_indexes(self.window_length + 1, self.nb_entries, size=1)[0]
+                    terminal0 = self.terminals[idx - 2]
+                assert self.window_length + 1 <= idx < self.nb_entries
+                idx_used.append(idx)
 
             # This code is slightly complicated by the fact that subsequent observations might be
             # from different episodes. We ensure that an experience never spans multiple episodes.
@@ -237,7 +243,7 @@ class SequentialMemory(Memory):
             experiences.append(Experience(state0=state0, action=action, reward=reward,
                                           state1=state1, terminal1=terminal1))
         assert len(experiences) == batch_size
-        return experiences
+        return experiences, idx_used
 
     def append(self, observation, action, reward, terminal, training=True):
         """Append an observation to the memory
