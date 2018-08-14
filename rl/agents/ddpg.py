@@ -389,11 +389,13 @@ class DDPGAgent(Agent):
         state0_batch_n = deepcopy(state0_batch)
         state1_batch_n = deepcopy(state1_batch)
         action_batch_n = deepcopy(action_batch)
+        meta_order_n = [i_policy]
         for i_meta in range(len(meta_n)):
             if i_meta != i_policy:
                 # NOTE -1 as there is +1 in the sampling function
                 experiences_other_agt, _ = \
                     meta_n[i_meta].policy.memory.sample(self.batch_size, np.array(batch_idxs) - 1)
+                meta_order_n.append(i_meta)
 
                 for i_exp, exp in enumerate(experiences_other_agt):
                     assert reward_batch[i_exp] == exp.reward
@@ -420,8 +422,6 @@ class DDPGAgent(Agent):
         assert action_batch.shape == (self.batch_size, self.nb_actions)
         assert action_batch_n.shape == (self.batch_size, self.nb_actions * len(meta_n))
 
-        assert len(meta_n) <= 2
-
         # Update critic, if warm up is over.
         if total_step > self.nb_steps_warmup_critic:
             # Get target_action_n
@@ -431,10 +431,10 @@ class DDPGAgent(Agent):
 
             target_actions_n = deepcopy(target_actions)
             for i_meta in range(len(meta_n)):
-                if i_meta != i_policy:
+                if i_meta > 0:
                     interval = state0_batch.shape[-1]
-                    next_state_batch = state1_batch_n[:, :, interval:2 * interval]
-                    target_actions = meta_n[i_meta].policy.target_actor.predict_on_batch(next_state_batch)
+                    next_state_batch = state1_batch_n[:, :, i_meta * interval:(i_meta + 1) * interval]
+                    target_actions = meta_n[meta_order_n[i_meta]].policy.target_actor.predict_on_batch(next_state_batch)
 
                     target_actions_n = np.concatenate((target_actions_n, target_actions), axis=1)
 
@@ -481,7 +481,7 @@ class DDPGAgent(Agent):
             if self.uses_learning_phase:
                 inputs += [self.training]
 
-            actor_output_other = action_batch_n[:, 2:4]  # TODO Think carefully for agt > 2
+            actor_output_other = action_batch_n[:, 2:]
             critic_obs_input = state0_batch_n
             action_values = self.actor_train_fn(
                 [inputs[0], self.training, actor_output_other, critic_obs_input])[0]
