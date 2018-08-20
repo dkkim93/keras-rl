@@ -181,11 +181,11 @@ class DDPGAgent(Agent):
             self.random_process.reset_states()
         self.recent_action = None
         self.recent_observation = None
-        if self.compiled:
-            self.actor.reset_states()
-            self.critic.reset_states()
-            self.target_actor.reset_states()
-            self.target_critic.reset_states()
+        # if self.compiled:
+        #     self.actor.reset_states()
+        #     self.critic.reset_states()
+        #     self.target_actor.reset_states()
+        #     self.target_critic.reset_states()
 
     def process_state_batch(self, batch):
         batch = np.array(batch)
