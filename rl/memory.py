@@ -169,6 +169,10 @@ class SequentialMemory(Memory):
         self.terminals = RingBuffer(limit)
         self.observations = RingBuffer(limit)
 
+    def seed(self, seed):
+        np.random.seed(seed)
+        random.seed(seed)
+
     def sample(self, batch_size, batch_idxs=None):
         """Return a randomized batch of experiences
 

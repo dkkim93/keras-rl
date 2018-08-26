@@ -77,6 +77,7 @@ class DDPGGumbelAgent(Agent):
 
     def seed(self, seed):
         np.random.seed(seed)
+        self.memory.seed(seed)
 
     @property
     def uses_learning_phase(self):
