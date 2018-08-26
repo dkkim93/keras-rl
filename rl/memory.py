@@ -195,9 +195,10 @@ class SequentialMemory(Memory):
                 low=self.window_length, 
                 high=self.nb_entries - 1, 
                 size=batch_size)
+            batch_idxs = np.array(batch_idxs) + 1  # NOTE Code below assumes with batch_idxs + 1
         else:
             sample_batch_flag = False
-        batch_idxs = np.array(batch_idxs) + 1
+
         assert np.min(batch_idxs) >= self.window_length + 1
         assert np.max(batch_idxs) < self.nb_entries
         assert len(batch_idxs) == batch_size
@@ -207,7 +208,7 @@ class SequentialMemory(Memory):
         idx_used = []
         for idx in batch_idxs:
             if sample_batch_flag:
-                terminal0 = self.terminals[idx - 2]
+                terminal0 = self.terminals[idx - 2]  # If "prev" state was terminal (-2 due to the +1 above)
                 while terminal0:
                     # Skip this transition because the environment was reset here. Select a new, random
                     # transition and use this instead. This may cause the batch to contain the same
@@ -221,17 +222,20 @@ class SequentialMemory(Memory):
             # from different episodes. We ensure that an experience never spans multiple episodes.
             # This is probably not that important in practice but it seems cleaner.
             state0 = [self.observations[idx - 1]]
-            for offset in range(0, self.window_length - 1):
-                current_idx = idx - 2 - offset
-                assert current_idx >= 1
-                current_terminal = self.terminals[current_idx - 1]
-                if current_terminal and not self.ignore_episode_boundaries:
-                    # The previously handled observation was terminal, don't add the current one.
-                    # Otherwise we would leak into a different episode.
-                    break
-                state0.insert(0, self.observations[current_idx])
-            while len(state0) < self.window_length:
-                state0.insert(0, zeroed_observation(state0[0]))
+            if self.window_length > 1:
+                for offset in range(0, self.window_length - 1):
+                    current_idx = idx - 2 - offset
+                    assert current_idx >= 1
+                    current_terminal = self.terminals[current_idx - 1]
+                    if current_terminal and not self.ignore_episode_boundaries:
+                        # The previously handled observation was terminal, don't add the current one.
+                        # Otherwise we would leak into a different episode.
+                        break
+                    state0.insert(0, self.observations[current_idx])
+
+                while len(state0) < self.window_length:
+                    state0.insert(0, zeroed_observation(state0[0]))
+
             action = self.actions[idx - 1]
             reward = self.rewards[idx - 1]
             terminal1 = self.terminals[idx - 1]
@@ -239,14 +243,19 @@ class SequentialMemory(Memory):
             # Okay, now we need to create the follow-up state. This is state0 shifted on timestep
             # to the right. Again, we need to be careful to not include an observation from the next
             # episode if the last state is terminal.
-            state1 = [np.copy(x) for x in state0[1:]]
+            state1 = [np.copy(x) for x in state0[1:]]  # dkk: Output is an empty list
             state1.append(self.observations[idx])
-
             assert len(state0) == self.window_length
             assert len(state1) == len(state0)
-            experiences.append(Experience(state0=state0, action=action, reward=reward,
-                                          state1=state1, terminal1=terminal1))
+
+            experiences.append(Experience(
+                state0=state0, 
+                action=action, 
+                reward=reward,
+                state1=state1, 
+                terminal1=terminal1))
         assert len(experiences) == batch_size
+
         return experiences, idx_used
 
     def append(self, observation, action, reward, terminal, training=True):
@@ -263,11 +272,15 @@ class SequentialMemory(Memory):
         # This needs to be understood as follows: in `observation`, take `action`, obtain `reward`
         # and weather the next state is `terminal` or not.
         if training:
-            if observation is not None and action is not None and reward is not None:
-                self.observations.append(observation)
-                self.actions.append(action)
-                self.rewards.append(reward)
-                self.terminals.append(terminal)
+            assert observation is not None
+            assert action is not None
+            assert reward is not None
+            assert terminal is not None
+
+            self.observations.append(observation)
+            self.actions.append(action)
+            self.rewards.append(reward)
+            self.terminals.append(terminal)
 
     @property
     def nb_entries(self):

@@ -264,17 +264,17 @@ class DDPGGumbelAgent(Agent):
 
         return action
 
-    def train_exec(self, total_step_count, exec_n, i_policy):
+    def get_train_batch(self):
         experiences, batch_idxs = self.memory.sample(self.batch_size)
         assert len(experiences) == self.batch_size
         assert len(batch_idxs) == self.batch_size
 
         # Start by extracting the necessary parameters (we use a vectorized implementation).
         state0_batch = []
+        state1_batch = []
         reward_batch = []
         action_batch = []
         terminal1_batch = []
-        state1_batch = []
         for e in experiences:
             state0_batch.append(e.state0)
             state1_batch.append(e.state1)
@@ -282,6 +282,9 @@ class DDPGGumbelAgent(Agent):
             action_batch.append(e.action)
             terminal1_batch.append(0. if e.terminal1 else 1.)
 
+        return state0_batch, state1_batch, reward_batch, action_batch, terminal1_batch, batch_idxs
+
+    def get_train_batch_all(self, state0_batch, state1_batch, reward_batch, action_batch, batch_idxs, exec_n, i_policy):
         # Get state0_batch_n, state1_batch_n, action_batch_n 
         # to train centralized critic
         state0_batch_n = deepcopy(state0_batch)
@@ -291,9 +294,8 @@ class DDPGGumbelAgent(Agent):
         policy_order_n = [i_policy]  # Denotes the policy order the data is processed
         for i_meta in range(len(exec_n)):
             if i_meta != i_policy:
-                # NOTE -1 as there is +1 in the sampling function
                 experiences_other_agt, _ = \
-                    exec_n[i_meta].policy.memory.sample(self.batch_size, np.array(batch_idxs) - 1)
+                    exec_n[i_meta].policy.memory.sample(self.batch_size, np.array(batch_idxs))
                 policy_order_n.append(i_meta)
 
                 for i_exp, exp in enumerate(experiences_other_agt):
@@ -306,7 +308,75 @@ class DDPGGumbelAgent(Agent):
                     action_batch_n[i_exp] = np.concatenate((
                         action_batch_n[i_exp], exp.action))
 
-        # Prepare and validate parameters.
+        return state0_batch_n, state1_batch_n, action_batch_n, policy_order_n
+
+    def update_actor(self, state0_batch, state0_batch_n, action_batch_n):
+        if len(self.actor.inputs) >= 2:
+            inputs = state0_batch[:]
+        else:
+            inputs = [state0_batch]
+        
+        if self.uses_learning_phase:
+            inputs += [self.training]
+
+        actor_output_other = action_batch_n[:, self.nb_actions:]
+        critic_obs_input = state0_batch_n
+        action_values = self.actor_train_fn(
+            [inputs[0], self.training, actor_output_other, critic_obs_input])[0]
+
+        assert action_values.shape == (self.batch_size, self.nb_actions)
+
+    def get_td_error(self, state0_batch, state1_batch, state1_batch_n, reward_batch, 
+                     terminal1_batch, exec_n, i_policy, policy_order_n):
+        # Get target_action_n
+        # Because this is centralized critic, we need target_action for "all" agents
+        target_actions = self.target_actor.predict_on_batch(state1_batch)  # Target action for i_policy
+        target_actions = self.action_n_to_onehot_n(np.argmax(target_actions, axis=1))
+
+        target_actions_n = deepcopy(target_actions)
+        for i_meta in range(len(exec_n)):
+            if i_meta > 0:
+                interval = state0_batch.shape[-1]  # Obs size for each agent
+                next_state_batch = state1_batch_n[:, :, i_meta * interval:(i_meta + 1) * interval]
+                target_actions = \
+                    exec_n[policy_order_n[i_meta]].policy.target_actor.predict_on_batch(next_state_batch)
+                target_actions = self.action_n_to_onehot_n(np.argmax(target_actions, axis=1))
+
+                target_actions_n = np.concatenate((target_actions_n, target_actions), axis=1)
+
+                assert next_state_batch.shape == (self.batch_size, 1, interval)
+                assert target_actions.shape == (self.batch_size, self.nb_actions)
+        assert target_actions_n.shape == (self.batch_size, self.nb_actions * len(exec_n))
+
+        if len(self.critic.inputs) >= 3:
+            state1_batch_n_with_action = state1_batch_n[:]
+        else:
+            state1_batch_n_with_action = [state1_batch_n]
+        state1_batch_n_with_action.insert(
+            self.critic_action_input_idx, target_actions_n)  # Put target_actions in front by input idx
+
+        target_q_values = self.target_critic.predict_on_batch(state1_batch_n_with_action).flatten()
+        assert target_q_values.shape == (self.batch_size,)
+
+        # Compute r_t + gamma * max_a Q(s_t+1, a) and update the target ys accordingly,
+        # but only for the affected output units (as given by action_batch).
+        discounted_reward_batch = self.gamma * target_q_values
+        discounted_reward_batch *= terminal1_batch
+        targets = (reward_batch + discounted_reward_batch).reshape(self.batch_size, 1)
+
+        assert discounted_reward_batch.shape == reward_batch.shape
+
+        return targets
+
+    def train_exec(self, total_step_count, exec_n, i_policy):
+        # Get train batch from own memory (NOTE not including any other agents)
+        state0_batch, state1_batch, reward_batch, action_batch, terminal1_batch, batch_idxs = \
+            self.get_train_batch()
+
+        # Get train batch for all agent to train centralized critic
+        state0_batch_n, state1_batch_n, action_batch_n, policy_order_n = self.get_train_batch_all(
+            state0_batch, state1_batch, reward_batch, action_batch, batch_idxs, exec_n, i_policy)
+
         state0_batch = self.process_state_batch(state0_batch)
         state1_batch = self.process_state_batch(state1_batch)
         terminal1_batch = np.array(terminal1_batch)
@@ -316,6 +386,7 @@ class DDPGGumbelAgent(Agent):
         state0_batch_n = self.process_state_batch(state0_batch_n)
         state1_batch_n = self.process_state_batch(state1_batch_n)
         action_batch_n = np.array(action_batch_n)
+
         assert reward_batch.shape == (self.batch_size,)
         assert terminal1_batch.shape == reward_batch.shape
         assert action_batch.shape == (self.batch_size, self.nb_actions)
@@ -323,43 +394,10 @@ class DDPGGumbelAgent(Agent):
 
         # Update critic, if warm up is over.
         if total_step_count > self.nb_steps_warmup_critic:
-            # Get target_action_n
-            # Because this is centralized critic, we need target_action for "all" agents
-            target_actions = self.target_actor.predict_on_batch(state1_batch)  # Target action for i_policy
-            target_actions = self.action_n_to_onehot_n(np.argmax(target_actions, axis=1))
-
-            target_actions_n = deepcopy(target_actions)
-            for i_meta in range(len(exec_n)):
-                if i_meta > 0:
-                    interval = state0_batch.shape[-1]  # Obs size for each agent
-                    next_state_batch = state1_batch_n[:, :, i_meta * interval:(i_meta + 1) * interval]
-                    target_actions = \
-                        exec_n[policy_order_n[i_meta]].policy.target_actor.predict_on_batch(next_state_batch)
-                    target_actions = self.action_n_to_onehot_n(np.argmax(target_actions, axis=1))
-
-                    target_actions_n = np.concatenate((target_actions_n, target_actions), axis=1)
-
-                    assert next_state_batch.shape == (self.batch_size, 1, interval)
-                    assert target_actions.shape == (self.batch_size, self.nb_actions)
-            assert target_actions_n.shape == (self.batch_size, self.nb_actions * len(exec_n))
-
-            # Get target_q_values from centralized critic
-            if len(self.critic.inputs) >= 3:
-                state1_batch_n_with_action = state1_batch_n[:]
-            else:
-                state1_batch_n_with_action = [state1_batch_n]
-            state1_batch_n_with_action.insert(
-                self.critic_action_input_idx, target_actions_n)  # Put target_actions in front by input idx
-
-            target_q_values = self.target_critic.predict_on_batch(state1_batch_n_with_action).flatten()
-            assert target_q_values.shape == (self.batch_size,)
-
-            # Compute r_t + gamma * max_a Q(s_t+1, a) and update the target ys accordingly,
-            # but only for the affected output units (as given by action_batch).
-            discounted_reward_batch = self.gamma * target_q_values
-            discounted_reward_batch *= terminal1_batch
-            assert discounted_reward_batch.shape == reward_batch.shape
-            targets = (reward_batch + discounted_reward_batch).reshape(self.batch_size, 1)
+            # Get td error from centralized critic
+            targets = self.get_td_error(
+                state0_batch, state1_batch, state1_batch_n, reward_batch, 
+                terminal1_batch, exec_n, i_policy, policy_order_n)
 
             # Perform a single batch update on the critic network.
             if len(self.critic.inputs) >= 3:
@@ -374,19 +412,7 @@ class DDPGGumbelAgent(Agent):
 
         # Update actor, if warm up is over.
         if total_step_count > self.nb_steps_warmup_actor:
-            if len(self.actor.inputs) >= 2:
-                inputs = state0_batch[:]
-            else:
-                inputs = [state0_batch]
-            
-            if self.uses_learning_phase:
-                inputs += [self.training]
-
-            actor_output_other = action_batch_n[:, self.nb_actions:]
-            critic_obs_input = state0_batch_n
-            action_values = self.actor_train_fn(
-                [inputs[0], self.training, actor_output_other, critic_obs_input])[0]
-            assert action_values.shape == (self.batch_size, self.nb_actions)
+            self.update_actor(state0_batch, state0_batch_n, action_batch_n)
 
     def add_memory(self, reward, total_step_count, terminal=False):
         # Store most recent experience in memory.
