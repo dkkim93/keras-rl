@@ -185,12 +185,16 @@ class SequentialMemory(Memory):
         # In addition we need enough entries to fill the desired window length.
         assert self.nb_entries >= self.window_length + 2, 'not enough entries in the memory'
 
+        # If batch_idxs is not provided, then sample a new batch
+        # If provided, then do not sample a new batch
         if batch_idxs is None:
             # Draw random indexes such that we have enough entries before each index to fill the
             # desired window length.
             sample_batch_flag = True
             batch_idxs = sample_batch_indexes(
-                self.window_length, self.nb_entries - 1, size=batch_size)
+                low=self.window_length, 
+                high=self.nb_entries - 1, 
+                size=batch_size)
         else:
             sample_batch_flag = False
         batch_idxs = np.array(batch_idxs) + 1

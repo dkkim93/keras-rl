@@ -1,6 +1,6 @@
 import numpy as np
-
-from keras.models import model_from_config, Sequential, Model, model_from_config
+import tensorflow as tf
+from keras.models import model_from_config
 import keras.optimizers as optimizers
 import keras.backend as K
 
@@ -14,6 +14,42 @@ def clone_model(model, custom_objects={}):
     clone = model_from_config(config, custom_objects=custom_objects)
     clone.set_weights(model.get_weights())
     return clone
+
+
+def mean_q(y_true, y_pred):
+    return K.mean(K.max(y_pred, axis=-1))
+
+
+# Gumbel softmax for categorical output and backpropagation
+# Because we are using tensorflow backend keras, directly using tensorflow would be fine.
+# Ref: https://github.com/ericjang/gumbel-softmax/blob/master/Categorical%20VAE.ipynb
+def sample_gumbel(shape, eps=1e-20): 
+    """Sample from Gumbel(0, 1)"""
+    U = tf.random_uniform(shape, minval=0, maxval=1)
+    return -tf.log(-tf.log(U + eps) + eps)
+
+def gumbel_softmax_sample(logits, temperature): 
+    """ Draw a sample from the Gumbel-Softmax distribution"""
+    y = logits + sample_gumbel(tf.shape(logits))
+    return tf.nn.softmax(y / temperature)
+
+def gumbel_softmax(logits, temperature=1, hard=True):
+    """Sample from the Gumbel-Softmax distribution and optionally discretize.
+    Args:
+        logits: [batch_size, n_class] unnormalized log-probs
+        temperature: non-negative scalar
+        hard: if True, take argmax, but differentiate w.r.t. soft sample y
+    Returns:
+        [batch_size, n_class] sample from the Gumbel-Softmax distribution.
+        If hard=True, then the returned sample will be one-hot, otherwise it will
+        be a probabilitiy distribution that sums to 1 across classes
+    """
+    y = gumbel_softmax_sample(logits, temperature)
+    if hard:
+        y_hard = tf.cast(tf.equal(y, tf.reduce_max(y, 1, keep_dims=True)), y.dtype)
+        y = tf.stop_gradient(y_hard - y) + y
+
+    return y
 
 
 def clone_optimizer(optimizer):
@@ -72,7 +108,6 @@ def huber_loss(y_true, y_pred, clip_value):
     squared_loss = .5 * K.square(x)
     linear_loss = clip_value * (K.abs(x) - .5 * clip_value)
     if K.backend() == 'tensorflow':
-        import tensorflow as tf
         if hasattr(tf, 'select'):
             return tf.select(condition, squared_loss, linear_loss)  # condition, true, false
         else:
