@@ -120,7 +120,7 @@ class DDPGGumbelAgent(Agent):
 
         return y
 
-    def compile(self, optimizer, metrics=[], meta_n=None, i_policy=None):
+    def compile(self, optimizer, metrics=[], exec_n=None):
         metrics += [mean_q]
 
         if type(optimizer) in (list, tuple):
@@ -167,14 +167,11 @@ class DDPGGumbelAgent(Agent):
 
         # Combine actor and critic so that we can get the policy gradient.
         if self.policy_type == "exec":
-            self.compile_exec(actor_optimizer)
-        elif self.policy_type == "meta":
-            self.compile_meta(actor_optimizer, meta_n, i_policy)
+            self.compile_exec(actor_optimizer, exec_n)
         else:
             raise ValueError()
 
-    def compile_meta(self, actor_optimizer, meta_n, i_policy):
-        raise ValueError()
+    def compile_exec(self, actor_optimizer, exec_n):
         # Set combined_inputs and output
         combined_inputs = []
         for i in self.critic.input:
@@ -189,8 +186,9 @@ class DDPGGumbelAgent(Agent):
 
         # We use placeholder for other meta policies actor output to make sure that 
         # gradient does not flow from this meta policy's critic to other meta policies' actors.
-        actor_output = self.actor(actor_input)
-        actor_output_other = K.placeholder(shape=(None, self.nb_actions * (len(meta_n) - 1)))  # Other agts actor output
+        actor_output = self.gumbel_softmax(
+            logits=self.actor(actor_input), temperature=1, hard=True)
+        actor_output_other = K.placeholder(shape=(None, self.nb_actions * (len(exec_n) - 1)))  # Other agts actor output
         actor_output_n = K.concatenate([actor_output, actor_output_other], axis=-1)
 
         combined_inputs[self.critic_action_input_idx] = actor_output_n
@@ -213,50 +211,47 @@ class DDPGGumbelAgent(Agent):
                 [self.actor(actor_input)], 
                 updates=updates)
         else:
-            raise NotImplementedError()
-            if self.uses_learning_phase:
-                critic_inputs += [K.learning_phase()]
-            self.actor_train_fn = K.function(critic_inputs, [self.actor(critic_inputs)], updates=updates)
+            raise ValueError("Only tensorflow backend is supported")
         self.actor_optimizer = actor_optimizer
 
         self.compiled = True
 
-    def compile_exec(self, actor_optimizer):
-        combined_inputs = []
-        critic_inputs = []
-        for i in self.critic.input:
-            if i == self.critic_action_input:
-                combined_inputs.append([])
-            else:
-                combined_inputs.append(i)
-                critic_inputs.append(i)
+    # def compile_exec(self, actor_optimizer):
+    #     combined_inputs = []
+    #     critic_inputs = []
+    #     for i in self.critic.input:
+    #         if i == self.critic_action_input:
+    #             combined_inputs.append([])
+    #         else:
+    #             combined_inputs.append(i)
+    #             critic_inputs.append(i)
 
-        # Using the Gumbel softmax backpropagation
-        combined_inputs[self.critic_action_input_idx] = self.gumbel_softmax(
-            logits=self.actor(critic_inputs), temperature=1, hard=True)
+    #     # Using the Gumbel softmax backpropagation
+    #     combined_inputs[self.critic_action_input_idx] = self.gumbel_softmax(
+    #         logits=self.actor(critic_inputs), temperature=1, hard=True)
 
-        combined_output = self.critic(combined_inputs)
+    #     combined_output = self.critic(combined_inputs)
 
-        updates = actor_optimizer.get_updates(
-            params=self.actor.trainable_weights, loss=-K.mean(combined_output))  # -sign to do gradient ascent
-        if self.target_model_update < 1.:
-            # Include soft target model updates.
-            updates += get_soft_target_model_updates(self.target_actor, self.actor, self.target_model_update)
-        updates += self.actor.updates  # include other updates of the actor, e.g. for BN
+    #     updates = actor_optimizer.get_updates(
+    #         params=self.actor.trainable_weights, loss=-K.mean(combined_output))  # -sign to do gradient ascent
+    #     if self.target_model_update < 1.:
+    #         # Include soft target model updates.
+    #         updates += get_soft_target_model_updates(self.target_actor, self.actor, self.target_model_update)
+    #     updates += self.actor.updates  # include other updates of the actor, e.g. for BN
 
-        # Finally, combine it all into a callable function.
-        if K.backend() == 'tensorflow':
-            self.actor_train_fn = K.function(
-                critic_inputs + [K.learning_phase()],
-                [self.actor(critic_inputs)], 
-                updates=updates)
-        else:
-            if self.uses_learning_phase:
-                critic_inputs += [K.learning_phase()]
-            self.actor_train_fn = K.function(critic_inputs, [self.actor(critic_inputs)], updates=updates)
-        self.actor_optimizer = actor_optimizer
+    #     # Finally, combine it all into a callable function.
+    #     if K.backend() == 'tensorflow':
+    #         self.actor_train_fn = K.function(
+    #             critic_inputs + [K.learning_phase()],
+    #             [self.actor(critic_inputs)], 
+    #             updates=updates)
+    #     else:
+    #         if self.uses_learning_phase:
+    #             critic_inputs += [K.learning_phase()]
+    #         self.actor_train_fn = K.function(critic_inputs, [self.actor(critic_inputs)], updates=updates)
+    #     self.actor_optimizer = actor_optimizer
 
-        self.compiled = True
+    #     self.compiled = True
 
     def load_weights(self, filepath):
         filename, extension = os.path.splitext(filepath)
@@ -300,6 +295,14 @@ class DDPGGumbelAgent(Agent):
 
         return onehot
 
+    def action_n_to_onehot_n(self, action_n):
+        # TODO Remove for loop for faster computation
+        onehot_n = np.zeros((self.batch_size, self.nb_actions))
+        for i_batch in range(self.batch_size):
+            onehot_n[i_batch, action_n[i_batch]] = 1.
+
+        return onehot_n
+
     def select_action(self, state, epsilon):
         batch = self.process_state_batch([state])
         action = self.actor.predict_on_batch(batch).flatten()
@@ -310,7 +313,6 @@ class DDPGGumbelAgent(Agent):
         if self.training and np.random.rand() < epsilon:
             random_action = np.random.randint(low=0, high=self.nb_actions)
             onehot_action = self.action_to_onehot(random_action)
-            print("Epsilon ...", epsilon, onehot_action, random_action)
 
         return onehot_action
 
@@ -336,76 +338,76 @@ class DDPGGumbelAgent(Agent):
             names += self.processor.metrics_names[:]
         return names
 
-    def train_exec(self, total_step):
-        experiences, _ = self.memory.sample(self.batch_size)
-        assert len(experiences) == self.batch_size
+    # def train_exec(self, total_step):
+    #     experiences, _ = self.memory.sample(self.batch_size)
+    #     assert len(experiences) == self.batch_size
 
-        # Start by extracting the necessary parameters (we use a vectorized implementation).
-        state0_batch = []
-        reward_batch = []
-        action_batch = []
-        terminal1_batch = []
-        state1_batch = []
-        for e in experiences:
-            state0_batch.append(e.state0)
-            state1_batch.append(e.state1)
-            reward_batch.append(e.reward)
-            action_batch.append(e.action)
-            terminal1_batch.append(0. if e.terminal1 else 1.)
+    #     # Start by extracting the necessary parameters (we use a vectorized implementation).
+    #     state0_batch = []
+    #     reward_batch = []
+    #     action_batch = []
+    #     terminal1_batch = []
+    #     state1_batch = []
+    #     for e in experiences:
+    #         state0_batch.append(e.state0)
+    #         state1_batch.append(e.state1)
+    #         reward_batch.append(e.reward)
+    #         action_batch.append(e.action)
+    #         terminal1_batch.append(0. if e.terminal1 else 1.)
 
-        # Prepare and validate parameters.
-        state0_batch = self.process_state_batch(state0_batch)
-        state1_batch = self.process_state_batch(state1_batch)
-        terminal1_batch = np.array(terminal1_batch)
-        reward_batch = np.array(reward_batch)
-        action_batch = np.array(action_batch)
-        assert reward_batch.shape == (self.batch_size,)
-        assert terminal1_batch.shape == reward_batch.shape
-        assert action_batch.shape == (self.batch_size, self.nb_actions)
+    #     # Prepare and validate parameters.
+    #     state0_batch = self.process_state_batch(state0_batch)
+    #     state1_batch = self.process_state_batch(state1_batch)
+    #     terminal1_batch = np.array(terminal1_batch)
+    #     reward_batch = np.array(reward_batch)
+    #     action_batch = np.array(action_batch)
+    #     assert reward_batch.shape == (self.batch_size,)
+    #     assert terminal1_batch.shape == reward_batch.shape
+    #     assert action_batch.shape == (self.batch_size, self.nb_actions)
 
-        # Update critic, if warm up is over.
-        if total_step > self.nb_steps_warmup_critic:
-            target_actions = self.target_actor.predict_on_batch(state1_batch)
-            assert target_actions.shape == (self.batch_size, self.nb_actions)
-            if len(self.critic.inputs) >= 3:
-                state1_batch_with_action = state1_batch[:]
-            else:
-                state1_batch_with_action = [state1_batch]
-            state1_batch_with_action.insert(self.critic_action_input_idx, target_actions)
-            target_q_values = self.target_critic.predict_on_batch(state1_batch_with_action).flatten()
-            assert target_q_values.shape == (self.batch_size,)
+    #     # Update critic, if warm up is over.
+    #     if total_step > self.nb_steps_warmup_critic:
+    #         target_actions = self.target_actor.predict_on_batch(state1_batch)
+    #         assert target_actions.shape == (self.batch_size, self.nb_actions)
+    #         if len(self.critic.inputs) >= 3:
+    #             state1_batch_with_action = state1_batch[:]
+    #         else:
+    #             state1_batch_with_action = [state1_batch]
+    #         state1_batch_with_action.insert(self.critic_action_input_idx, target_actions)
+    #         target_q_values = self.target_critic.predict_on_batch(state1_batch_with_action).flatten()
+    #         assert target_q_values.shape == (self.batch_size,)
 
-            # Compute r_t + gamma * max_a Q(s_t+1, a) and update the target ys accordingly,
-            # but only for the affected output units (as given by action_batch).
-            discounted_reward_batch = self.gamma * target_q_values
-            discounted_reward_batch *= terminal1_batch
-            assert discounted_reward_batch.shape == reward_batch.shape
-            targets = (reward_batch + discounted_reward_batch).reshape(self.batch_size, 1)
+    #         # Compute r_t + gamma * max_a Q(s_t+1, a) and update the target ys accordingly,
+    #         # but only for the affected output units (as given by action_batch).
+    #         discounted_reward_batch = self.gamma * target_q_values
+    #         discounted_reward_batch *= terminal1_batch
+    #         assert discounted_reward_batch.shape == reward_batch.shape
+    #         targets = (reward_batch + discounted_reward_batch).reshape(self.batch_size, 1)
 
-            # Perform a single batch update on the critic network.
-            if len(self.critic.inputs) >= 3:
-                state0_batch_with_action = state0_batch[:]
-            else:
-                state0_batch_with_action = [state0_batch]
-            state0_batch_with_action.insert(self.critic_action_input_idx, action_batch)
-            metrics = self.critic.train_on_batch(state0_batch_with_action, targets)
-            if self.processor is not None:
-                metrics += self.processor.metrics
+    #         # Perform a single batch update on the critic network.
+    #         if len(self.critic.inputs) >= 3:
+    #             state0_batch_with_action = state0_batch[:]
+    #         else:
+    #             state0_batch_with_action = [state0_batch]
+    #         state0_batch_with_action.insert(self.critic_action_input_idx, action_batch)
+    #         metrics = self.critic.train_on_batch(state0_batch_with_action, targets)
+    #         if self.processor is not None:
+    #             metrics += self.processor.metrics
 
-        # Update actor, if warm up is over.
-        if total_step > self.nb_steps_warmup_actor:
-            # TODO: implement metrics for actor
-            if len(self.actor.inputs) >= 2:
-                inputs = state0_batch[:]
-            else:
-                inputs = [state0_batch]
-            if self.uses_learning_phase:
-                inputs += [self.training]
-            action_values = self.actor_train_fn(inputs)[0]
-            assert action_values.shape == (self.batch_size, self.nb_actions)
+    #     # Update actor, if warm up is over.
+    #     if total_step > self.nb_steps_warmup_actor:
+    #         # TODO: implement metrics for actor
+    #         if len(self.actor.inputs) >= 2:
+    #             inputs = state0_batch[:]
+    #         else:
+    #             inputs = [state0_batch]
+    #         if self.uses_learning_phase:
+    #             inputs += [self.training]
+    #         action_values = self.actor_train_fn(inputs)[0]
+    #         assert action_values.shape == (self.batch_size, self.nb_actions)
 
-    def train_meta(self, total_step, meta_n, i_policy):
-        assert meta_n is not None
+    def train_exec(self, total_step, exec_n, i_policy):
+        assert exec_n is not None
         assert i_policy is not None
 
         experiences, batch_idxs = self.memory.sample(self.batch_size)
@@ -431,11 +433,11 @@ class DDPGGumbelAgent(Agent):
         state1_batch_n = deepcopy(state1_batch)
         action_batch_n = deepcopy(action_batch)
         meta_order_n = [i_policy]
-        for i_meta in range(len(meta_n)):
+        for i_meta in range(len(exec_n)):
             if i_meta != i_policy:
                 # NOTE -1 as there is +1 in the sampling function
                 experiences_other_agt, _ = \
-                    meta_n[i_meta].policy.memory.sample(self.batch_size, np.array(batch_idxs) - 1)
+                    exec_n[i_meta].policy.memory.sample(self.batch_size, np.array(batch_idxs) - 1)
                 meta_order_n.append(i_meta)
 
                 for i_exp, exp in enumerate(experiences_other_agt):
@@ -461,7 +463,7 @@ class DDPGGumbelAgent(Agent):
         assert reward_batch.shape == (self.batch_size,)
         assert terminal1_batch.shape == reward_batch.shape
         assert action_batch.shape == (self.batch_size, self.nb_actions)
-        assert action_batch_n.shape == (self.batch_size, self.nb_actions * len(meta_n))
+        assert action_batch_n.shape == (self.batch_size, self.nb_actions * len(exec_n))
 
         # Update critic, if warm up is over.
         if total_step > self.nb_steps_warmup_critic:
@@ -469,19 +471,21 @@ class DDPGGumbelAgent(Agent):
             # Because this is centralized critic, we need target_action for all agents
             # TODO Need more carefull thought for agt > 2
             target_actions = self.target_actor.predict_on_batch(state1_batch)
+            target_actions = self.action_n_to_onehot_n(np.argmax(target_actions, axis=1))
 
             target_actions_n = deepcopy(target_actions)
-            for i_meta in range(len(meta_n)):
+            for i_meta in range(len(exec_n)):
                 if i_meta > 0:
                     interval = state0_batch.shape[-1]
                     next_state_batch = state1_batch_n[:, :, i_meta * interval:(i_meta + 1) * interval]
-                    target_actions = meta_n[meta_order_n[i_meta]].policy.target_actor.predict_on_batch(next_state_batch)
+                    target_actions = exec_n[meta_order_n[i_meta]].policy.target_actor.predict_on_batch(next_state_batch)
+                    target_actions = self.action_n_to_onehot_n(np.argmax(target_actions, axis=1))
 
                     target_actions_n = np.concatenate((target_actions_n, target_actions), axis=1)
 
                     assert next_state_batch.shape == (self.batch_size, 1, interval)
                     assert target_actions.shape == (self.batch_size, self.nb_actions)
-            assert target_actions_n.shape == (self.batch_size, self.nb_actions * len(meta_n))
+            assert target_actions_n.shape == (self.batch_size, self.nb_actions * len(exec_n))
 
             if len(self.critic.inputs) >= 3:
                 state1_batch_n_with_action = state1_batch_n[:]
@@ -522,7 +526,7 @@ class DDPGGumbelAgent(Agent):
             if self.uses_learning_phase:
                 inputs += [self.training]
 
-            actor_output_other = action_batch_n[:, 2:]
+            actor_output_other = action_batch_n[:, self.nb_actions:]
             critic_obs_input = state0_batch_n
             action_values = self.actor_train_fn(
                 [inputs[0], self.training, actor_output_other, critic_obs_input])[0]
@@ -534,7 +538,7 @@ class DDPGGumbelAgent(Agent):
             self.memory.append(
                 self.recent_observation, self.recent_action, reward, terminal, training=self.training)
 
-    def backward(self, total_step, meta_n=None, i_policy=None):
+    def backward(self, total_step, exec_n=None, i_policy=None):
         metrics = [np.nan for _ in self.metrics_names]
         if not self.training:
             # We're done here. No need to update the experience memory since we only use the working
@@ -550,16 +554,14 @@ class DDPGGumbelAgent(Agent):
         can_train_either = total_step > self.nb_steps_warmup_critic or total_step > self.nb_steps_warmup_actor
         if can_train_either and total_step % self.train_interval == 0:
             if self.policy_type == "exec":
-                self.train_exec(total_step)
-            elif self.policy_type == "meta":
                 # Check whether all memories have same length
-                memory_len = meta_n[0].policy.memory.nb_entries
-                for i_meta in range(len(meta_n)):
-                    if i_meta != i_policy:
-                        memory_len_diff = abs(meta_n[i_meta].policy.memory.nb_entries - memory_len)
+                memory_len = exec_n[0].policy.memory.nb_entries
+                for i_exec in range(len(exec_n)):
+                    if i_exec != i_policy:
+                        memory_len_diff = abs(exec_n[i_exec].policy.memory.nb_entries - memory_len)
                         assert memory_len_diff == 0
 
-                self.train_meta(total_step, meta_n, i_policy)
+                self.train_exec(total_step, exec_n, i_policy)
             else:
                 raise ValueError()
 
