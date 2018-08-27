@@ -94,7 +94,7 @@ class DDPGGumbelAgent(Agent):
             names += self.processor.metrics_names[:]
         return names
 
-    def compile(self, optimizer, metrics=[], exec_n=None):
+    def compile(self, optimizer, metrics=[], n_student=None):
         metrics += [mean_q]
 
         if type(optimizer) in (list, tuple):
@@ -140,12 +140,9 @@ class DDPGGumbelAgent(Agent):
         self.critic.compile(optimizer=critic_optimizer, loss=clipped_error, metrics=critic_metrics)
 
         # Combine actor and critic so that we can get the policy gradient.
-        if self.policy_type == "exec":
-            self.compile_exec(actor_optimizer, exec_n)
-        else:
-            raise ValueError()
+        self.compile_policy(actor_optimizer, n_student)
 
-    def compile_exec(self, actor_optimizer, exec_n):
+    def compile_policy(self, actor_optimizer, n_student):
         # Set combined_inputs and output
         combined_inputs = []
         for i in self.critic.input:
@@ -162,7 +159,8 @@ class DDPGGumbelAgent(Agent):
         # gradient does not flow from this meta policy's critic to other meta policies' actors.
         actor_output = gumbel_softmax(
             logits=self.actor(actor_input), temperature=1, hard=True)
-        actor_output_other = K.placeholder(shape=(None, self.nb_actions * (len(exec_n) - 1)))  # Other agts actor output
+        actor_output_other = K.placeholder(
+            shape=(None, self.nb_actions * (n_student - 1)))  # Other agts actor output
         actor_output_n = K.concatenate([actor_output, actor_output_other], axis=-1)
 
         combined_inputs[self.critic_action_input_idx] = actor_output_n
@@ -214,11 +212,14 @@ class DDPGGumbelAgent(Agent):
             self.random_process.reset_states()
         self.recent_action = None
         self.recent_observation = None
-        if self.compiled:
-            self.actor.reset_states()
-            self.critic.reset_states()
-            self.target_actor.reset_states()
-            self.target_critic.reset_states()
+        
+        # NOTE dkk: Commenting this out as these are needed only for LSTM
+        # Uncomment if we use LSTM
+        # if self.compiled:
+        #     self.actor.reset_states()
+        #     self.critic.reset_states()
+        #     self.target_actor.reset_states()
+        #     self.target_critic.reset_states()
 
     def process_state_batch(self, batch):
         batch = np.array(batch)
@@ -285,7 +286,8 @@ class DDPGGumbelAgent(Agent):
 
         return state0_batch, state1_batch, reward_batch, action_batch, terminal1_batch, batch_idxs
 
-    def get_train_batch_all(self, state0_batch, state1_batch, reward_batch, action_batch, batch_idxs, exec_n, i_policy):
+    def get_train_batch_all(self, state0_batch, state1_batch, reward_batch, action_batch, 
+                            batch_idxs, policy_n, i_policy):
         # Get state0_batch_n, state1_batch_n, action_batch_n 
         # to train centralized critic
         state0_batch_n = deepcopy(state0_batch)
@@ -293,10 +295,10 @@ class DDPGGumbelAgent(Agent):
         action_batch_n = deepcopy(action_batch)
 
         policy_order_n = [i_policy]  # Denotes the policy order the data is processed
-        for i_meta in range(len(exec_n)):
+        for i_meta in range(len(policy_n)):
             if i_meta != i_policy:
                 experiences_other_agt, _ = \
-                    exec_n[i_meta].policy.memory.sample(self.batch_size, np.array(batch_idxs))
+                    policy_n[i_meta].policy.policy.memory.sample(self.batch_size, np.array(batch_idxs))
                 policy_order_n.append(i_meta)
 
                 for i_exp, exp in enumerate(experiences_other_agt):
@@ -328,26 +330,28 @@ class DDPGGumbelAgent(Agent):
         assert action_values.shape == (self.batch_size, self.nb_actions)
 
     def get_td_error(self, state0_batch, state1_batch, state1_batch_n, reward_batch, 
-                     terminal1_batch, exec_n, i_policy, policy_order_n):
+                     terminal1_batch, policy_n, i_policy, policy_order_n):
+        assert len(policy_n) == 2
+
         # Get target_action_n
         # Because this is centralized critic, we need target_action for "all" agents
         target_actions = self.target_actor.predict_on_batch(state1_batch)  # Target action for i_policy
         target_actions = self.action_n_to_onehot_n(np.argmax(target_actions, axis=1))
 
         target_actions_n = deepcopy(target_actions)
-        for i_meta in range(len(exec_n)):
+        for i_meta in range(len(policy_n)):
             if i_meta > 0:
                 interval = state0_batch.shape[-1]  # Obs size for each agent
                 next_state_batch = state1_batch_n[:, :, i_meta * interval:(i_meta + 1) * interval]
                 target_actions = \
-                    exec_n[policy_order_n[i_meta]].policy.target_actor.predict_on_batch(next_state_batch)
+                    policy_n[policy_order_n[i_meta]].policy.policy.target_actor.predict_on_batch(next_state_batch)
                 target_actions = self.action_n_to_onehot_n(np.argmax(target_actions, axis=1))
 
                 target_actions_n = np.concatenate((target_actions_n, target_actions), axis=1)
 
                 assert next_state_batch.shape == (self.batch_size, 1, interval)
                 assert target_actions.shape == (self.batch_size, self.nb_actions)
-        assert target_actions_n.shape == (self.batch_size, self.nb_actions * len(exec_n))
+        assert target_actions_n.shape == (self.batch_size, self.nb_actions * len(policy_n))
 
         if len(self.critic.inputs) >= 3:
             state1_batch_n_with_action = state1_batch_n[:]
@@ -369,14 +373,16 @@ class DDPGGumbelAgent(Agent):
 
         return targets
 
-    def train_exec(self, total_step_count, exec_n, i_policy):
+    def train_exec(self, total_step_count, policy_n, i_policy):
+        assert len(policy_n) == 2
+
         # Get train batch from own memory (NOTE not including any other agents)
         state0_batch, state1_batch, reward_batch, action_batch, terminal1_batch, batch_idxs = \
             self.get_train_batch()
 
         # Get train batch for all agent to train centralized critic
         state0_batch_n, state1_batch_n, action_batch_n, policy_order_n = self.get_train_batch_all(
-            state0_batch, state1_batch, reward_batch, action_batch, batch_idxs, exec_n, i_policy)
+            state0_batch, state1_batch, reward_batch, action_batch, batch_idxs, policy_n, i_policy)
 
         state0_batch = self.process_state_batch(state0_batch)
         state1_batch = self.process_state_batch(state1_batch)
@@ -391,14 +397,14 @@ class DDPGGumbelAgent(Agent):
         assert reward_batch.shape == (self.batch_size,)
         assert terminal1_batch.shape == reward_batch.shape
         assert action_batch.shape == (self.batch_size, self.nb_actions)
-        assert action_batch_n.shape == (self.batch_size, self.nb_actions * len(exec_n))
+        assert action_batch_n.shape == (self.batch_size, self.nb_actions * len(policy_n))
 
         # Update critic, if warm up is over.
         if total_step_count > self.nb_steps_warmup_critic:
             # Get td error from centralized critic
             targets = self.get_td_error(
                 state0_batch, state1_batch, state1_batch_n, reward_batch, 
-                terminal1_batch, exec_n, i_policy, policy_order_n)
+                terminal1_batch, policy_n, i_policy, policy_order_n)
 
             # Perform a single batch update on the critic network.
             if len(self.critic.inputs) >= 3:
@@ -421,17 +427,17 @@ class DDPGGumbelAgent(Agent):
             self.memory.append(
                 self.recent_observation, self.recent_action, reward, terminal, training=self.training)
 
-    def check_memory_len(self, exec_n, i_policy):
-        memory_len = exec_n[0].policy.memory.nb_entries
+    def check_memory_len(self, policy_n, i_policy):
+        memory_len = policy_n[0].policy.policy.memory.nb_entries
 
-        for i_exec in range(len(exec_n)):
+        for i_exec in range(len(policy_n)):
             if i_exec != i_policy:
-                memory_len_diff = abs(exec_n[i_exec].policy.memory.nb_entries - memory_len)
+                memory_len_diff = abs(policy_n[i_exec].policy.policy.memory.nb_entries - memory_len)
                 assert memory_len_diff == 0
 
         return True
 
-    def backward(self, total_step_count, exec_n=None, i_policy=None):
+    def backward(self, total_step_count, policy_n=None, i_policy=None):
         metrics = [np.nan for _ in self.metrics_names]
 
         # Check training and batch size. 
@@ -444,14 +450,11 @@ class DDPGGumbelAgent(Agent):
             total_step_count > self.nb_steps_warmup_critic or \
             total_step_count > self.nb_steps_warmup_actor
         if can_train_either and total_step_count % self.train_interval == 0:
-            if self.policy_type == "exec":
-                assert exec_n is not None
-                assert i_policy is not None
+            assert policy_n is not None
+            assert i_policy is not None
 
-                self.check_memory_len(exec_n, i_policy)
-                self.train_exec(total_step_count, exec_n, i_policy)
-            else:
-                raise ValueError()
+            self.check_memory_len(policy_n, i_policy)
+            self.train_exec(total_step_count, policy_n, i_policy)
 
         if self.target_model_update >= 1 and total_step_count % self.target_model_update == 0:
             self.update_target_models_hard()
